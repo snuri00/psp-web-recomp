@@ -8,10 +8,6 @@ PSP games running in the browser without an emulator. The game's MIPS machine co
   <a href="docs/media/demo.mp4">Watch the full recording (1:46)</a>
 </p>
 
-| Title menu | In the browser | Fullscreen at 1440×816 |
-|---|---|---|
-| ![Title menu](docs/media/menu.jpg) | ![The page](docs/media/page.jpg) | ![Combat](docs/media/combat.jpg) |
-
 The first title brought up this way is God of War: Chains of Olympus. It plays from boot through the menus, cutscenes and combat, at 60 frames per second in the scenes measured so far in Chrome and Firefox on a laptop, at up to four times the PSP's resolution, and on phones with on-screen touch controls. Music, speech and sound effects work. Movies are skipped for now.
 
 God of War: Ghost of Sparta followed through the same scripts. It needed the PSP's DRM decryption for one small file, a handful of system calls and a lighting fix, and no performance work: it runs at 55 to 60 frames per second at three times the native resolution.
