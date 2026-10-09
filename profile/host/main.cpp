@@ -79,6 +79,7 @@ bool start_session(const std::string &module_path, const std::string &disc_root,
     s.kernel->set_roots(disc_root, memstick_root);
     if (!manifest.empty() && !s.kernel->enable_webfs(manifest, data_url))
         std::cerr << "[pspweb] no disc manifest at " << manifest << ", using local files\n";
+    s.kernel->add_main_module(*module, load_base, image_end - load_base);
     s.kernel->install(imports);
     s.kernel->boot(elf.runtime_entry(load_base), module->gp, guest_path);
     s.running = true;

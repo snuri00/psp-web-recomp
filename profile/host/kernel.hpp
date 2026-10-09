@@ -7,6 +7,7 @@
 
 #include "ge.hpp"
 #include "ge_worker.hpp"
+#include "generated_modules.hpp"
 #include "webfs.hpp"
 
 #include "psprecomp/elf32.hpp"
@@ -14,6 +15,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
@@ -37,7 +39,7 @@ inline constexpr std::uint32_t kVramAddress = 0x04000000u;
 inline constexpr std::uint32_t kVramSize = 0x00200000u;
 
 enum class ThreadState { Dormant, Ready, Running, Waiting, Dead };
-enum class WaitType { None, Sleep, Delay, Vblank, ThreadEnd, Sema, EventFlag, Fpl, Io, Callback, Ge };
+enum class WaitType { None, Sleep, Delay, Vblank, ThreadEnd, Sema, EventFlag, Fpl, Io, Callback, Ge, Mutex, Mbx };
 
 // PSP pad button bits (SceCtrlData::Buttons).
 namespace pad {
@@ -105,6 +107,7 @@ struct DirectoryEntry {
     std::string name;
     std::uint64_t size{};
     bool directory{};
+    std::uint32_t lbn{}; // disc files: the sector number games read from st_private[0]
 };
 
 struct OpenDirectory {
@@ -118,6 +121,36 @@ struct FixedPool {
     std::uint32_t base{};
     std::int32_t memory_block{-1};
     std::vector<bool> used;
+};
+
+struct LoadedModule {
+    std::string path;          // disc path relative to the disc root
+    std::string name;          // from its module info
+    std::uint32_t base{}, size{}, gp{}, start{}, stop{};
+    std::int32_t block{-1};    // memory block, -1 for the main executable
+    bool has_code{};           // recompiled code is registered
+};
+
+struct Mutex {
+    std::string name;
+    std::uint32_t attr{};
+    std::int32_t count{};
+    std::int32_t owner{}; // thread uid, 0 when unlocked
+};
+
+// Mailboxes pass pointers to guest message packets; the queue lives on the host.
+struct Mailbox {
+    std::string name;
+    std::uint32_t attr{};
+    std::deque<std::uint32_t> messages;
+};
+
+struct SubInterrupt {
+    std::uint32_t handler{};
+    std::uint32_t arg{};
+    std::uint32_t gp{};
+    bool enabled{};
+    std::int32_t running{}; // uid of the handler thread while it runs
 };
 
 struct AudioChannel {
@@ -155,6 +188,9 @@ public:
     void install(const std::vector<psprecomp::PspImport> &imports);
     // Creates and readies the loader thread that runs module_start.
     void boot(std::uint32_t entry, std::uint32_t gp, const std::string &module_path);
+    // Records the executable and makes its exported libraries callable from
+    // modules the game loads later.
+    void add_main_module(const psprecomp::PspModuleInfo &info, std::uint32_t base, std::uint32_t size);
 
     // Runs one host frame: vblank, timers, then guest code for up to budget_ms.
     // Returns false once the guest exited, crashed or has no live threads.
@@ -216,8 +252,12 @@ private:
     // Runs guest function `entry` on a temporary thread while the calling
     // thread waits; `done` maps the function's return value to the caller's.
     // Works even when the guest function blocks (for example on streamed I/O).
+    // Runs a guest function on a temporary thread while the calling thread
+    // waits; `done` turns its return value into the call's result. gp 0 keeps
+    // the caller's.
     void call_guest(Ctx &ctx, std::uint32_t entry, std::initializer_list<std::uint32_t> args,
-                    std::function<std::uint32_t(std::uint32_t)> done);
+                    std::function<std::uint32_t(std::uint32_t)> done, std::uint32_t gp = 0u,
+                    std::uint32_t stack_size = 0x8000u);
     void wake(Thread &t, std::uint32_t result);
     void poll_waits();
     bool try_satisfy_sema(Thread &t);
@@ -237,6 +277,17 @@ private:
     [[nodiscard]] bool disc_relative(const std::string &psp_path, std::string &relative) const;
     [[nodiscard]] bool stat_path(const std::string &psp_path, DirectoryEntry &entry) const;
     void write_stat(std::uint32_t address, const DirectoryEntry &entry);
+    // Like the PSP, file and directory descriptors reuse the lowest free number
+    // below 64; some games index tables with them. -1 when all are taken.
+    [[nodiscard]] std::int32_t allocate_fd() const;
+    // Games read a disc file's sector from its stat and then open it as
+    // "disc0:/sce_lbn0x<sector>_size0x<bytes>". The extracted disc has no
+    // sectors, so each file gets a stable one of its own the first time it is seen.
+    std::uint32_t disc_lbn(const std::string &relative, std::uint64_t size);
+    [[nodiscard]] std::string resolve_lbn_path(const std::string &psp_path) const;
+    std::map<std::string, std::uint32_t> lbn_by_path_;
+    std::map<std::uint32_t, std::pair<std::string, std::uint64_t>> path_by_lbn_;
+    std::uint32_t next_lbn_{0x1000u};
     void web_read(Ctx &ctx, std::int32_t fd, std::uint32_t buffer, std::uint32_t length, bool async);
     std::uint32_t plain_read(OpenFile &open, std::uint32_t buffer, std::uint32_t length);
     void with_file_contents(Ctx &ctx, std::int32_t fd,
@@ -266,6 +317,21 @@ private:
     void sceKernelGetSystemTimeWide(Ctx &ctx);
     void sceKernelGetSystemTime(Ctx &ctx);
     void sceKernelCreateSema(Ctx &ctx);
+    void sceKernelCreateMutex(Ctx &ctx);
+    void sceKernelDeleteMutex(Ctx &ctx);
+    void sceKernelLockMutex(Ctx &ctx);
+    void sceKernelTryLockMutex(Ctx &ctx);
+    void sceKernelUnlockMutex(Ctx &ctx);
+    void sceKernelCreateMbx(Ctx &ctx);
+    void sceKernelDeleteMbx(Ctx &ctx);
+    void sceKernelSendMbx(Ctx &ctx);
+    void sceKernelReceiveMbx(Ctx &ctx);
+    void sceKernelPollMbx(Ctx &ctx);
+    void sceKernelRegisterSubIntrHandler(Ctx &ctx);
+    void sceKernelReleaseSubIntrHandler(Ctx &ctx);
+    void sceKernelEnableSubIntr(Ctx &ctx);
+    void sceKernelDisableSubIntr(Ctx &ctx);
+    void run_interrupts(std::uint32_t interrupt);
     void sceKernelDeleteSema(Ctx &ctx);
     void sceKernelSignalSema(Ctx &ctx);
     void sceKernelWaitSema(Ctx &ctx);
@@ -292,6 +358,19 @@ private:
     void sceKernelSelfStopUnloadModule(Ctx &ctx);
     void sceKernelLoadModule(Ctx &ctx);
     void sceKernelStartModule(Ctx &ctx);
+    void sceKernelStopModule(Ctx &ctx);
+    void sceKernelUnloadModule(Ctx &ctx);
+    void sceKernelStopUnloadSelfModuleWithStatus(Ctx &ctx);
+    void sceKernelGetModuleIdByAddress(Ctx &ctx);
+    void sceKernelGetModuleId(Ctx &ctx);
+    void sceKernelQueryModuleInfo(Ctx &ctx);
+    void sceKernelGetModuleIdList(Ctx &ctx);
+    std::uint32_t load_module_image(const std::string &relative, std::span<const std::uint8_t> bytes);
+    void register_exports(const psprecomp::PspModuleInfo &info);
+    void unload_module(std::int32_t uid);
+    [[nodiscard]] std::int32_t module_at(std::uint32_t address) const;
+    void with_path_contents(Ctx &ctx, const std::string &psp_path,
+                            std::function<std::uint32_t(std::span<const std::uint8_t>)> use);
 
     // StdioForUser.
     void sceKernelStdin(Ctx &ctx);
@@ -329,6 +408,8 @@ private:
     void sceGeListEnQueue(Ctx &ctx);
     void sceGeListUpdateStallAddr(Ctx &ctx);
     void sceGeGetCmd(Ctx &ctx);
+    void sceGeSaveContext(Ctx &ctx);
+    void sceGeRestoreContext(Ctx &ctx);
     void sceGeListSync(Ctx &ctx);
     void sceGeDrawSync(Ctx &ctx);
 
@@ -343,19 +424,25 @@ private:
 
     // devices.cpp: controller, audio, UMD, utility dialogs, misc kernel queries.
     void install_devices();
-    void audio_output(Ctx &ctx, AudioChannel &channel, std::uint32_t buffer, std::uint32_t lvol, std::uint32_t rvol);
+    void audio_output(Ctx &ctx, AudioChannel &channel, std::uint32_t buffer, std::uint32_t lvol, std::uint32_t rvol,
+                      bool blocking = true);
     void dialog_get_status(Ctx &ctx, UtilityDialog &dialog);
     void sceCtrlPeekBufferPositive(Ctx &ctx);
     void sceAudioChReserve(Ctx &ctx);
     void sceAudioChRelease(Ctx &ctx);
     void sceAudioOutputBlocking(Ctx &ctx);
     void sceAudioOutputPannedBlocking(Ctx &ctx);
+    void sceAudioOutputPanned(Ctx &ctx);
     void sceAudioSetChannelDataLen(Ctx &ctx);
     void sceAudioGetChannelRestLength(Ctx &ctx);
     void sceAudioOutput2Reserve(Ctx &ctx);
     void sceAudioOutput2OutputBlocking(Ctx &ctx);
     void sceAudioOutput2ChangeLength(Ctx &ctx);
     void sceUmdCheckMedium(Ctx &ctx);
+    void sceUmdGetDriveStat(Ctx &ctx);
+    void sceUtilityGetSystemParamInt(Ctx &ctx);
+    void sceCtrlReadLatch(Ctx &ctx);
+    void sceCtrlPeekLatch(Ctx &ctx);
     void sceImposeGetLanguageMode(Ctx &ctx);
     void sceDisplayGetFramePerSec(Ctx &ctx);
     void sceUtilityMsgDialogInitStart(Ctx &ctx);
@@ -365,6 +452,7 @@ private:
     void sceKernelDeleteFpl(Ctx &ctx);
     void sceKernelAllocateFpl(Ctx &ctx);
     void sceKernelFreeFpl(Ctx &ctx);
+    void sceKernelTryAllocateFpl(Ctx &ctx);
     void sceKernelReferThreadStatus(Ctx &ctx);
     void sceKernelReferEventFlagStatus(Ctx &ctx);
     void sceKernelLibcClock(Ctx &ctx);
@@ -382,8 +470,11 @@ private:
     std::map<std::int32_t, MemoryBlock> blocks_;
     std::map<std::int32_t, OpenFile> files_;
     std::map<std::int32_t, OpenDirectory> directories_;
-    std::set<std::int32_t> modules_;
+    std::map<std::int32_t, LoadedModule> modules_;
     std::map<std::int32_t, FixedPool> fpls_;
+    std::map<std::int32_t, Mutex> mutexes_;
+    std::map<std::int32_t, Mailbox> mailboxes_;
+    std::map<std::pair<std::uint32_t, std::uint32_t>, SubInterrupt> sub_interrupts_; // (interrupt, sub) -> handler
     struct GuestCall {
         std::int32_t caller{};
         std::function<std::uint32_t(std::uint32_t)> done;
@@ -410,11 +501,11 @@ private:
     AudioSink audio_sink_{};
     UtilityDialog msg_dialog_{};
     std::uint32_t pad_buttons_{};
+    std::uint32_t latch_make_{}, latch_break_{}; // buttons pressed / released since the last sceCtrlReadLatch
     std::uint8_t pad_lx_{128u};
     std::uint8_t pad_ly_{128u};
     std::int32_t current_uid_{-1};
     std::int32_t next_uid_{0x100};
-    std::int32_t next_fd_{3};
     std::uint64_t ready_sequence_{};
     // Guest time is frame-based: each host frame is one vblank period, real
     // time advances it within the frame, and an idle guest warps forward to its

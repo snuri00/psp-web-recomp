@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <iomanip>
 #include <iostream>
 #include <optional>
@@ -20,6 +22,8 @@ constexpr std::uint32_t kErrorFileNotFound = 0x80010002u;
 constexpr std::uint32_t kErrorBadFile = 0x80020323u;
 constexpr std::uint32_t kErrorIo = 0x80010005u;
 constexpr std::uint32_t kErrorPgdInvalidHeader = 0x80510204u;
+constexpr std::uint32_t kErrorTooManyFiles = 0x80020320u;
+constexpr std::int32_t kMaxFds = 64;
 constexpr std::uint64_t kMaxWholeFileRead = 256u << 20u;
 
 #if !defined(__EMSCRIPTEN__)
@@ -80,6 +84,51 @@ bool Kernel::disc_relative(const std::string &psp_path, std::string &relative) c
     return true;
 }
 
+namespace {
+std::string lbn_key(std::string relative) {
+    std::string key;
+    for (char c : relative) {
+        if (c == '\\') c = '/';
+        if (c == '/' && !key.empty() && key.back() == '/') continue;
+        key.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    if (key.empty() || key.front() != '/') key.insert(key.begin(), '/');
+    while (key.size() > 1u && key.back() == '/') key.pop_back();
+    return key;
+}
+} // namespace
+
+std::uint32_t Kernel::disc_lbn(const std::string &relative, std::uint64_t size) {
+    const std::string key = lbn_key(relative);
+    if (const auto it = lbn_by_path_.find(key); it != lbn_by_path_.end()) return it->second;
+    const std::uint32_t lbn = next_lbn_;
+    next_lbn_ += static_cast<std::uint32_t>((size + 2047u) / 2048u) + 1u; // keep every file's range apart
+    lbn_by_path_[key] = lbn;
+    path_by_lbn_[lbn] = {relative, size};
+    return lbn;
+}
+
+std::string Kernel::resolve_lbn_path(const std::string &psp_path) const {
+    std::string relative;
+    if (!disc_relative(psp_path, relative)) return psp_path;
+    const std::string key = lbn_key(relative);
+    if (key.rfind("/sce_lbn", 0) != 0u) return psp_path;
+    char *end = nullptr;
+    const auto lbn = static_cast<std::uint32_t>(std::strtoul(key.c_str() + 8, &end, 16));
+    const auto it = path_by_lbn_.find(lbn);
+    if (it == path_by_lbn_.end()) {
+        std::cerr << "[io] no disc file starts at sector " << lbn << " (" << psp_path << ")\n";
+        return psp_path;
+    }
+    return psp_path.substr(0, psp_path.find(':') + 1u) + it->second.first;
+}
+
+std::int32_t Kernel::allocate_fd() const {
+    for (std::int32_t fd = 3; fd < kMaxFds; ++fd)
+        if (!files_.contains(fd) && !directories_.contains(fd)) return fd;
+    return -1;
+}
+
 bool Kernel::stat_path(const std::string &psp_path, DirectoryEntry &entry) const {
     std::string relative;
     if (webfs_ && disc_relative(psp_path, relative)) {
@@ -103,10 +152,15 @@ void Kernel::write_stat(std::uint32_t address, const DirectoryEntry &entry) {
     rt_.memory().store32(address + 4u, entry.directory ? 0x10u : 0x20u);
     rt_.memory().store32(address + 8u, static_cast<std::uint32_t>(entry.size));
     rt_.memory().store32(address + 12u, static_cast<std::uint32_t>(entry.size >> 32u));
+    rt_.memory().store32(address + 0x40u, entry.lbn); // st_private[0]
 }
 
 void Kernel::sceIoOpen(Ctx &ctx) {
-    const std::string psp_path = read_string(ctx.gpr[4]);
+    std::string psp_path = resolve_lbn_path(read_string(ctx.gpr[4]));
+    static const bool skip_movies = std::getenv("PSPWEB_SKIP_MOVIES") != nullptr;
+    if (skip_movies && psp_path.size() > 4u && lbn_key(psp_path.substr(psp_path.size() - 4u)) == "/.pmf") psp_path += ".skipped";
+    static const bool trace = std::getenv("PSPWEB_TRACE_IO") != nullptr;
+    if (trace) std::cerr << "[io] open " << read_string(ctx.gpr[4]) << " -> " << psp_path << "\n";
     std::string relative;
     if (webfs_ && disc_relative(psp_path, relative)) {
         const WebFile *file = webfs_->find(relative);
@@ -115,9 +169,18 @@ void Kernel::sceIoOpen(Ctx &ctx) {
             finish(ctx, kErrorFileNotFound);
             return;
         }
-        const std::int32_t fd = next_fd_++;
+        const std::int32_t fd = allocate_fd();
+        if (fd < 0) {
+            finish(ctx, kErrorTooManyFiles);
+            return;
+        }
         files_[fd] = OpenFile{nullptr, file, 0u, psp_path};
         finish(ctx, static_cast<std::uint32_t>(fd));
+        return;
+    }
+    const std::int32_t fd = allocate_fd();
+    if (fd < 0) {
+        finish(ctx, kErrorTooManyFiles);
         return;
     }
     std::FILE *file = std::fopen(host_path(psp_path).string().c_str(), fopen_mode(ctx.gpr[5]));
@@ -126,7 +189,6 @@ void Kernel::sceIoOpen(Ctx &ctx) {
         finish(ctx, kErrorFileNotFound);
         return;
     }
-    const std::int32_t fd = next_fd_++;
     files_[fd] = OpenFile{file, nullptr, 0u, psp_path};
     finish(ctx, static_cast<std::uint32_t>(fd));
 }
@@ -288,10 +350,12 @@ void Kernel::sceIoLseek32(Ctx &ctx) {
 
 void Kernel::sceIoGetstat(Ctx &ctx) {
     DirectoryEntry entry;
-    if (!stat_path(read_string(ctx.gpr[4]), entry)) {
+    const std::string psp_path = resolve_lbn_path(read_string(ctx.gpr[4]));
+    if (!stat_path(psp_path, entry)) {
         finish(ctx, kErrorFileNotFound);
         return;
     }
+    if (std::string relative; disc_relative(psp_path, relative)) entry.lbn = disc_lbn(relative, entry.size);
     write_stat(ctx.gpr[5], entry);
     finish(ctx, 0u);
 }
@@ -304,6 +368,8 @@ void Kernel::sceIoChdir(Ctx &ctx) {
 void Kernel::sceIoDopen(Ctx &ctx) {
     const std::string psp_path = read_string(ctx.gpr[4]);
     OpenDirectory dir;
+    std::string disc_dir;
+    const bool on_disc = disc_relative(psp_path, disc_dir);
     std::string relative;
     if (webfs_ && disc_relative(psp_path, relative)) {
         const WebFile *folder = webfs_->find(relative);
@@ -328,7 +394,15 @@ void Kernel::sceIoDopen(Ctx &ctx) {
             dir.entries.push_back({entry.path().filename().string(), directory ? 0u : entry.file_size(ec), directory});
         }
     }
-    const std::int32_t fd = next_fd_++;
+    if (on_disc)
+        for (DirectoryEntry &entry : dir.entries)
+            if (entry.name != "." && entry.name != "..")
+                entry.lbn = disc_lbn(disc_dir + (disc_dir.ends_with('/') ? "" : "/") + entry.name, entry.size);
+    const std::int32_t fd = allocate_fd();
+    if (fd < 0) {
+        finish(ctx, kErrorTooManyFiles);
+        return;
+    }
     directories_[fd] = std::move(dir);
     finish(ctx, static_cast<std::uint32_t>(fd));
 }
@@ -358,8 +432,15 @@ void Kernel::sceIoDclose(Ctx &ctx) {
 
 // Async calls return immediately; results are collected with WaitAsync/PollAsync.
 void Kernel::sceIoOpenAsync(Ctx &ctx) {
-    const std::string psp_path = read_string(ctx.gpr[4]);
-    const std::int32_t fd = next_fd_++;
+    std::string psp_path = resolve_lbn_path(read_string(ctx.gpr[4]));
+    // Debugging aid: pretend movies are missing, which makes some games skip them.
+    static const bool skip_movies = std::getenv("PSPWEB_SKIP_MOVIES") != nullptr;
+    if (skip_movies && psp_path.size() > 4u && lbn_key(psp_path.substr(psp_path.size() - 4u)) == "/.pmf") psp_path += ".skipped";
+    const std::int32_t fd = allocate_fd();
+    if (fd < 0) {
+        finish(ctx, kErrorTooManyFiles);
+        return;
+    }
     std::string relative;
     OpenFile open{nullptr, nullptr, 0u, psp_path};
     if (webfs_ && disc_relative(psp_path, relative)) {
@@ -370,6 +451,7 @@ void Kernel::sceIoOpenAsync(Ctx &ctx) {
     }
     const bool ok = open.web != nullptr || open.file != nullptr;
     if (!ok) std::cerr << "[io] async open failed: " << psp_path << "\n";
+    if (std::getenv("PSPWEB_TRACE_IO") != nullptr) std::cerr << "[io] open async " << psp_path << " -> " << fd << "\n";
     open.async_result = ok ? fd : static_cast<std::int32_t>(kErrorFileNotFound);
     files_[fd] = std::move(open);
     finish(ctx, static_cast<std::uint32_t>(fd));
@@ -395,6 +477,9 @@ void Kernel::sceIoReadAsync(Ctx &ctx) {
     std::uint8_t *dst = rt_.memory().raw_pointer(ctx.gpr[5], ctx.gpr[6]);
     it->second.async_result = it->second.file != nullptr && dst != nullptr
         ? static_cast<std::int64_t>(std::fread(dst, 1u, ctx.gpr[6], it->second.file)) : 0;
+    if (std::getenv("PSPWEB_TRACE_IO") != nullptr)
+        std::cerr << "[io] read async fd " << fd << " " << ctx.gpr[6] << " bytes at " << std::ftell(it->second.file)
+                  << " -> " << it->second.async_result << "\n";
     it->second.async_pending = false;
     finish(ctx, 0u);
 }
@@ -522,6 +607,43 @@ void Kernel::with_file_contents(Ctx &ctx, std::int32_t fd,
         self->wait_mode = 0u;
     }
     block(ctx, WaitType::Io, 0u);
+}
+
+// Like with_file_contents, for a file that is not open (a module to load).
+void Kernel::with_path_contents(Ctx &ctx, const std::string &psp_path,
+                                std::function<std::uint32_t(std::span<const std::uint8_t>)> use) {
+    std::string relative;
+    if (webfs_ && disc_relative(psp_path, relative)) {
+        const WebFile *file = webfs_->find(relative);
+        if (file == nullptr || file->directory || file->size > kMaxWholeFileRead) {
+            finish(ctx, use({}));
+            return;
+        }
+        const auto size = static_cast<std::uint32_t>(file->size);
+        auto bytes = std::make_shared<std::vector<std::uint8_t>>(size);
+        if (webfs_->read_cached(*file, 0u, size, bytes->data())) {
+            finish(ctx, use(*bytes));
+            return;
+        }
+        const std::int32_t waiting_thread = current_uid_;
+        webfs_->fetch(*file, 0u, size, [this, file, size, bytes, use = std::move(use), waiting_thread](bool ok) {
+            const bool read = ok && webfs_->read_cached(*file, 0u, size, bytes->data());
+            const std::uint32_t result = use(read ? std::span<const std::uint8_t>(*bytes) : std::span<const std::uint8_t>());
+            if (Thread *t = thread(waiting_thread); t != nullptr && t->uid == waiting_thread &&
+                t->state == ThreadState::Waiting && t->wait == WaitType::Io)
+                wake(*t, result);
+        });
+        if (Thread *self = current(); self != nullptr) {
+            self->wait_uid = -1;
+            self->wait_mode = 0u;
+        }
+        block(ctx, WaitType::Io, 0u);
+        return;
+    }
+    std::ifstream in(host_path(psp_path), std::ios::binary);
+    std::vector<std::uint8_t> bytes;
+    if (in) bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    finish(ctx, use(bytes));
 }
 
 // Games use ioctls on disc files to set up PGD (DRM) decryption; other

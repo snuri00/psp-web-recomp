@@ -38,7 +38,13 @@ std::uint32_t big_endian32(const psprecomp::GuestMemory &memory, std::uint32_t a
 void Kernel::install_mpeg() {
     auto &m = rt_.memory();
     auto simple = [this](std::uint32_t nid, const char *name, std::function<std::uint32_t(Ctx &)> body) {
-        rt_.register_hle("sceMpeg", nid, [body](psprecomp::Runtime &, Ctx &ctx) { finish(ctx, body(ctx)); });
+        static const bool trace = std::getenv("PSPWEB_TRACE_HLE") != nullptr;
+        rt_.register_hle("sceMpeg", nid, [body, name](psprecomp::Runtime &, Ctx &ctx) {
+            const std::uint32_t a0 = ctx.gpr[4], a1 = ctx.gpr[5], a2 = ctx.gpr[6];
+            const std::uint32_t result = body(ctx);
+            if (trace) std::fprintf(stderr, "[mpeg] %s(0x%X, 0x%X, 0x%X) -> 0x%X\n", name, a0, a1, a2, result);
+            finish(ctx, result);
+        });
         rt_.nids().add("sceMpeg", nid, name);
     };
     // Registration keys must match install_fallback(), which uses hex NIDs.

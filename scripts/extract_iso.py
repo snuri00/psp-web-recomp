@@ -1,11 +1,21 @@
-# Extracts an ISO9660 image (optionally inside a .zip) to a directory:
-#   extract_iso.py <image.iso|image.zip> <out_dir>
-import os, struct, sys, zipfile
+# Extracts an ISO9660 image (optionally inside a .zip or .7z) to a directory:
+#   extract_iso.py <image.iso|image.zip|image.7z> <out_dir>
+import os, struct, subprocess, sys, zipfile
 src, out = sys.argv[1], sys.argv[2]
+temporary = None
 if src.lower().endswith('.zip'):
     zf = zipfile.ZipFile(src)
     member = next(n for n in zf.namelist() if n.lower().endswith('.iso'))
     f = zf.open(member)
+elif src.lower().endswith('.7z'):
+    # 7z streams cannot seek, so the image is unpacked next to the output first.
+    listing = subprocess.run(['7z', 'l', '-slt', '-ba', src], capture_output=True, text=True, check=True).stdout
+    member = next(line[7:] for line in listing.splitlines() if line.startswith('Path = ') and line.lower().endswith('.iso'))
+    os.makedirs(out, exist_ok=True)
+    temporary = os.path.join(os.path.dirname(os.path.abspath(out)), 'unpacked.iso')
+    with open(temporary, 'wb') as o:
+        subprocess.run(['7z', 'e', '-so', src, member], stdout=o, check=True)
+    f = open(temporary, 'rb')
 else:
     f = open(src, 'rb')
 SEC = 2048
@@ -43,4 +53,7 @@ for path, lba, size in sorted(files, key=lambda e: e[1]):
         while left:
             chunk = f.read(min(left, 1 << 20)); o.write(chunk); left -= len(chunk)
     total += size
+if temporary:
+    f.close()
+    os.remove(temporary)
 print(f'extracted {len(files)} files, {total >> 20} MB to {out}')

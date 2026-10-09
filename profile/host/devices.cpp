@@ -20,6 +20,8 @@ constexpr std::uint32_t kErrorUnknownThread = 0x80020198u;
 constexpr std::uint32_t kErrorUnknownEventFlag = 0x8002019Au;
 constexpr std::uint32_t kErrorAudioChannelNotReserved = 0x80260008u;
 constexpr std::uint32_t kErrorAudioNoChannel = 0x80260002u;
+constexpr std::uint32_t kErrorAudioChannelBusy = 0x80260002u;
+constexpr std::uint32_t kErrorInvalidSystemParam = 0x80110103u;
 constexpr std::uint32_t kAudioRate = 44100u;
 
 std::uint32_t align_up(std::uint32_t value, std::uint32_t alignment) {
@@ -29,6 +31,8 @@ std::uint32_t align_up(std::uint32_t value, std::uint32_t alignment) {
 } // namespace
 
 void Kernel::set_pad(std::uint32_t buttons, std::uint8_t lx, std::uint8_t ly) {
+    latch_make_ |= buttons & ~pad_buttons_;
+    latch_break_ |= pad_buttons_ & ~buttons;
     pad_buttons_ = buttons;
     pad_lx_ = lx;
     pad_ly_ = ly;
@@ -40,6 +44,8 @@ void Kernel::install_devices() {
     const char *ctrl = "sceCtrl";
     hle(ctrl, 0x3A622550u, "sceCtrlPeekBufferPositive", &Kernel::sceCtrlPeekBufferPositive);
     hle(ctrl, 0x1F803938u, "sceCtrlReadBufferPositive", &Kernel::sceCtrlPeekBufferPositive);
+    hle(ctrl, 0x0B588501u, "sceCtrlReadLatch", &Kernel::sceCtrlReadLatch);
+    hle(ctrl, 0xB1D0E5CDu, "sceCtrlPeekLatch", &Kernel::sceCtrlPeekLatch);
     hle(ctrl, 0x1F4011E6u, "sceCtrlSetSamplingMode", &Kernel::return_zero);
     hle(ctrl, 0x6A2774F3u, "sceCtrlSetSamplingCycle", &Kernel::return_zero);
     hle(ctrl, 0xA7144800u, "sceCtrlSetIdleCancelThreshold", &Kernel::return_zero);
@@ -49,6 +55,7 @@ void Kernel::install_devices() {
     hle(audio, 0x6FC46853u, "sceAudioChRelease", &Kernel::sceAudioChRelease);
     hle(audio, 0x136CAF51u, "sceAudioOutputBlocking", &Kernel::sceAudioOutputBlocking);
     hle(audio, 0x13F592BCu, "sceAudioOutputPannedBlocking", &Kernel::sceAudioOutputPannedBlocking);
+    hle(audio, 0xE2D56B2Du, "sceAudioOutputPanned", &Kernel::sceAudioOutputPanned);
     hle(audio, 0xCB2E439Eu, "sceAudioSetChannelDataLen", &Kernel::sceAudioSetChannelDataLen);
     hle(audio, 0xB011922Fu, "sceAudioGetChannelRestLength", &Kernel::sceAudioGetChannelRestLength);
     hle(audio, 0x95FD0C2Du, "sceAudioChangeChannelConfig", &Kernel::return_zero);
@@ -59,6 +66,7 @@ void Kernel::install_devices() {
     hle(audio, 0x63F2889Cu, "sceAudioOutput2ChangeLength", &Kernel::sceAudioOutput2ChangeLength);
 
     hle("sceUmdUser", 0x46EBB729u, "sceUmdCheckMedium", &Kernel::sceUmdCheckMedium);
+    hle("sceUmdUser", 0x6B4A146Cu, "sceUmdGetDriveStat", &Kernel::sceUmdGetDriveStat);
     hle("sceUmdUser", 0xC6183D47u, "sceUmdActivate", &Kernel::return_zero);
     hle("sceUmdUser", 0x56202973u, "sceUmdWaitDriveStatWithTimer", &Kernel::return_zero);
     hle("sceUmdUser", 0x8EF08FCEu, "sceUmdWaitDriveStat", &Kernel::return_zero);
@@ -70,6 +78,7 @@ void Kernel::install_devices() {
     hle("Kernel_Library", 0xB55249D2u, "sceKernelIsCpuIntrEnable", &Kernel::return_one);
 
     const char *util = "sceUtility";
+    hle(util, 0xA5DA2406u, "sceUtilityGetSystemParamInt", &Kernel::sceUtilityGetSystemParamInt);
     hle(util, 0x2AD8E239u, "sceUtilityMsgDialogInitStart", &Kernel::sceUtilityMsgDialogInitStart);
     hle(util, 0x9A1C91D7u, "sceUtilityMsgDialogGetStatus", &Kernel::sceUtilityMsgDialogGetStatus);
     hle(util, 0x95FC253Bu, "sceUtilityMsgDialogUpdate", &Kernel::return_zero);
@@ -80,6 +89,7 @@ void Kernel::install_devices() {
     hle(tm, 0xED1410E0u, "sceKernelDeleteFpl", &Kernel::sceKernelDeleteFpl);
     hle(tm, 0xD979E9BFu, "sceKernelAllocateFpl", &Kernel::sceKernelAllocateFpl);
     hle(tm, 0xF6414A71u, "sceKernelFreeFpl", &Kernel::sceKernelFreeFpl);
+    hle(tm, 0x623AE665u, "sceKernelTryAllocateFpl", &Kernel::sceKernelTryAllocateFpl);
     hle(tm, 0x17C1684Eu, "sceKernelReferThreadStatus", &Kernel::sceKernelReferThreadStatus);
     hle(tm, 0xA66B0120u, "sceKernelReferEventFlagStatus", &Kernel::sceKernelReferEventFlagStatus);
     hle(tm, 0x3AD58B8Cu, "sceKernelSuspendDispatchThread", &Kernel::return_one);
@@ -95,6 +105,10 @@ void Kernel::install_devices() {
     hle(suspend, 0x090CCB3Fu, "sceKernelPowerTick", &Kernel::return_zero);
     hle("SysMemUserForUser", 0x342061E5u, "sceKernelSetCompiledSdkVersion370", &Kernel::return_zero);
     hle("SysMemUserForUser", 0x1B4217BCu, "sceKernelSetCompiledSdkVersion603_605", &Kernel::return_zero);
+    hle("SysMemUserForUser", 0x91DE343Cu, "sceKernelSetCompiledSdkVersion500_505", &Kernel::return_zero);
+    // Memory stick callbacks and folders need no work: the memory stick is a host folder.
+    hle("IoFileMgrForUser", 0x54F5FB11u, "sceIoDevctl", &Kernel::return_zero);
+    hle("IoFileMgrForUser", 0x06A70004u, "sceIoMkdir", &Kernel::return_zero);
     hle("scePower", 0xEBD177D6u, "scePowerSetClockFrequency", &Kernel::return_zero);
     hle("scePower", 0x469989ADu, "scePowerSetClockFrequency2", &Kernel::return_zero);
     // Firmware modules are all high-level emulated, so loading one is a no-op.
@@ -136,12 +150,16 @@ void Kernel::sceCtrlPeekBufferPositive(Ctx &ctx) {
 // has played, which paces audio threads at the real 44.1 kHz rate.
 
 void Kernel::audio_output(Ctx &ctx, AudioChannel &channel, std::uint32_t buffer,
-                          std::uint32_t lvol, std::uint32_t rvol) {
+                          std::uint32_t lvol, std::uint32_t rvol, bool blocking) {
     const std::uint32_t frames = channel.samples;
     // A buffer starts when the channel's previous one ends, or now if it is idle.
     const std::uint64_t now = now_us();
     const std::uint64_t now_sample = now * kAudioRate / 1000000u;
     const std::uint64_t start = std::max(now_sample, channel.next_sample);
+    if (!blocking && start > now_sample) {
+        finish(ctx, kErrorAudioChannelBusy); // the previous buffer has not started playing yet
+        return;
+    }
     channel.next_sample = start + frames;
     channel.busy_until_us = channel.next_sample * 1000000u / kAudioRate;
     if (frames != 0u && buffer != 0u) {
@@ -248,6 +266,15 @@ void Kernel::sceAudioOutputPannedBlocking(Ctx &ctx) {
     audio_output(ctx, audio_channels_[channel], ctx.gpr[7], ctx.gpr[5], ctx.gpr[6]);
 }
 
+void Kernel::sceAudioOutputPanned(Ctx &ctx) {
+    const std::uint32_t channel = ctx.gpr[4];
+    if (channel >= audio_channels_.size() || !audio_channels_[channel].reserved) {
+        finish(ctx, kErrorAudioChannelNotReserved);
+        return;
+    }
+    audio_output(ctx, audio_channels_[channel], ctx.gpr[7], ctx.gpr[5], ctx.gpr[6], false);
+}
+
 void Kernel::sceAudioSetChannelDataLen(Ctx &ctx) {
     const std::uint32_t channel = ctx.gpr[4];
     if (channel < audio_channels_.size()) audio_channels_[channel].samples = ctx.gpr[5];
@@ -282,6 +309,37 @@ void Kernel::sceAudioOutput2ChangeLength(Ctx &ctx) {
 // UMD, impose, display, clocks
 
 void Kernel::sceUmdCheckMedium(Ctx &ctx) { finish(ctx, 1u); }
+void Kernel::sceUmdGetDriveStat(Ctx &ctx) { finish(ctx, 0x32u); } // present, ready, readable
+
+void Kernel::sceUtilityGetSystemParamInt(Ctx &ctx) {
+    std::uint32_t value = 0u;
+    switch (ctx.gpr[4]) {
+    case 2: case 3: case 4: case 5: case 6: case 7: break; // ad hoc channel, power save, date/time format, zone, DST
+    case 8: value = 1u; break;  // language: English
+    case 9: value = 1u; break;  // cross confirms
+    default:
+        finish(ctx, kErrorInvalidSystemParam);
+        return;
+    }
+    if (ctx.gpr[5] != 0u) rt_.memory().store32(ctx.gpr[5], value);
+    finish(ctx, 0u);
+}
+
+void Kernel::sceCtrlPeekLatch(Ctx &ctx) {
+    if (ctx.gpr[4] != 0u) {
+        auto &m = rt_.memory();
+        m.store32(ctx.gpr[4], latch_make_);
+        m.store32(ctx.gpr[4] + 4u, latch_break_);
+        m.store32(ctx.gpr[4] + 8u, pad_buttons_);
+        m.store32(ctx.gpr[4] + 12u, ~pad_buttons_);
+    }
+    finish(ctx, 1u);
+}
+
+void Kernel::sceCtrlReadLatch(Ctx &ctx) {
+    sceCtrlPeekLatch(ctx);
+    latch_make_ = latch_break_ = 0u;
+}
 
 void Kernel::sceImposeGetLanguageMode(Ctx &ctx) {
     if (ctx.gpr[4] != 0u) rt_.memory().store32(ctx.gpr[4], 1u); // English
@@ -398,6 +456,23 @@ void Kernel::sceKernelAllocateFpl(Ctx &ctx) {
         begin_timeout(*self, ctx.gpr[6]);
     }
     block(ctx, WaitType::Fpl, 0u);
+}
+
+void Kernel::sceKernelTryAllocateFpl(Ctx &ctx) {
+    const auto it = fpls_.find(static_cast<std::int32_t>(ctx.gpr[4]));
+    if (it == fpls_.end()) {
+        finish(ctx, kErrorUnknownUid);
+        return;
+    }
+    auto &pool = it->second;
+    for (std::size_t i = 0; i < pool.used.size(); ++i) {
+        if (pool.used[i]) continue;
+        pool.used[i] = true;
+        rt_.memory().store32(ctx.gpr[5], pool.base + static_cast<std::uint32_t>(i) * pool.block_size);
+        finish(ctx, 0u);
+        return;
+    }
+    finish(ctx, kErrorNoMemory);
 }
 
 void Kernel::sceKernelFreeFpl(Ctx &ctx) {

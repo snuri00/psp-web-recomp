@@ -410,6 +410,19 @@ void Kernel::install_atrac() {
         put(ctx.gpr[5], static_cast<std::uint32_t>(a->track.frame_samples()));
         return 0u;
     });
+    add(0xA554A158u, "sceAtracGetBitrate", [get, put](Ctx &ctx) {
+        Atrac *a = get(ctx.gpr[4]);
+        if (a == nullptr) return kErrorBadId;
+        const std::uint64_t bits_per_second =
+            static_cast<std::uint64_t>(a->track.block_align) * 8u * 44100u / static_cast<std::uint64_t>(a->track.frame_samples());
+        put(ctx.gpr[5], static_cast<std::uint32_t>((bits_per_second + 500u) / 1000u)); // kbit/s
+        return 0u;
+    });
+    add(0xB3B5D042u, "sceAtracGetOutputChannel", [get, put](Ctx &ctx) {
+        if (get(ctx.gpr[4]) == nullptr) return kErrorBadId;
+        put(ctx.gpr[5], 2u); // decoded output is always stereo here
+        return 0u;
+    });
 }
 
 } // namespace pspweb

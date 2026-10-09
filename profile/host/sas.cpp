@@ -193,7 +193,13 @@ void Kernel::install_sas() {
     auto &m = rt_.memory();
     Sas &sas = state(sas_);
     auto add = [this](std::uint32_t nid, const char *name, std::function<std::uint32_t(Ctx &)> body) {
-        rt_.register_hle("sceSasCore", nid, [body](psprecomp::Runtime &, Ctx &ctx) { finish(ctx, body(ctx)); });
+        static const bool trace = std::getenv("PSPWEB_TRACE_HLE") != nullptr;
+        rt_.register_hle("sceSasCore", nid, [body, name](psprecomp::Runtime &, Ctx &ctx) {
+            const std::uint32_t a0 = ctx.gpr[4], a1 = ctx.gpr[5], a2 = ctx.gpr[6];
+            const std::uint32_t result = body(ctx);
+            if (trace) std::fprintf(stderr, "[sas] %s(0x%X, 0x%X, 0x%X) -> 0x%X\n", name, a0, a1, a2, result);
+            finish(ctx, result);
+        });
         rt_.nids().add("sceSasCore", nid, name);
         char key[40];
         std::snprintf(key, sizeof key, "sceSasCore:0x%08X", nid);

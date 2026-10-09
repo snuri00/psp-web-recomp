@@ -293,6 +293,42 @@ void Ge::execute(std::uint32_t op) {
     else if (cmd == kTransferStart) block_transfer();
 }
 
+std::vector<std::uint32_t> Ge::save_context() const {
+    // Commands that act rather than set state are left out; matrices are
+    // re-uploaded through their own commands.
+    const auto stateful = [](std::uint32_t cmd) {
+        return cmd != kNop && !(cmd >= kPrim && cmd <= kFinish) && cmd != kOrigin && cmd != kLoadClut &&
+               cmd != kTransferStart && cmd != 0xCBu && cmd != 0xCCu && cmd != kBoneMatrixNumber &&
+               cmd != kBoneMatrixData && !(cmd >= kWorldMatrixNumber && cmd <= kTgenMatrixData);
+    };
+    const auto f24 = [](float f) { return std::bit_cast<std::uint32_t>(f) >> 8u; };
+    std::vector<std::uint32_t> out;
+    out.push_back((kBase << 24u) | regs_[kBase]);
+    for (std::uint32_t cmd = 0; cmd < 256u; ++cmd)
+        if (cmd != kBase && stateful(cmd)) out.push_back((cmd << 24u) | regs_[cmd]);
+    const auto matrix = [&](std::uint32_t number, std::uint32_t data, const float *values, std::size_t count) {
+        out.push_back(number << 24u);
+        for (std::size_t i = 0; i < count; ++i) out.push_back((data << 24u) | f24(values[i]));
+    };
+    matrix(kWorldMatrixNumber, kWorldMatrixData, world_.data(), world_.size());
+    matrix(kViewMatrixNumber, kViewMatrixData, view_.data(), view_.size());
+    matrix(kProjMatrixNumber, kProjMatrixData, proj_.data(), proj_.size());
+    matrix(kTgenMatrixNumber, kTgenMatrixData, tgen_.data(), tgen_.size());
+    out.push_back(kBoneMatrixNumber << 24u);
+    for (const auto &bone : bones_)
+        for (float v : bone) out.push_back((kBoneMatrixData << 24u) | f24(v));
+    return out;
+}
+
+void Ge::restore_context(const std::vector<std::uint32_t> &commands) {
+    for (const std::uint32_t op : commands) {
+        const std::uint32_t cmd = op >> 24u;
+        if (cmd == kLoadClut || cmd == kTransferStart || (cmd >= kPrim && cmd <= kFinish)) continue;
+        execute(op);
+    }
+    state_dirty_ = matrix_dirty_ = pv_dirty_ = light_dirty_ = tex_dirty_ = true;
+}
+
 // ---------------------------------------------------------------------------
 // Vertices
 

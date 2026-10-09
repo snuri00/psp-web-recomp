@@ -48,6 +48,10 @@ public:
         prim_in_frame_ = 0u;
         state_dirty_ = true; // cached textures revalidate once per frame
     }
+    // sceGeSaveContext / sceGeRestoreContext: the state as a list of GE commands
+    // (games treat the context buffer as opaque, and it holds up to 512 words).
+    [[nodiscard]] std::vector<std::uint32_t> save_context() const;
+    void restore_context(const std::vector<std::uint32_t> &commands);
     // Routes primitives to the GL backend instead of the software rasterizer.
     void set_gl(GeGl *gl);
     // Marks guest VRAM bytes as rewritten so cached textures there revalidate.

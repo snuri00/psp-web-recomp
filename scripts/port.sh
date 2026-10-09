@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Ports a PSP game of yours to the browser in one go:
-#   scripts/port.sh <name> <game.iso | game.zip | extracted_disc_dir> [--native] [--opt N]
+#   scripts/port.sh <name> <game.iso | game.zip | game.7z | extracted_disc_dir> [--native] [--opt N]
 #
 #   1. extracts the disc to games/<name>/root/disc
 #   2. decrypts PSP_GAME/SYSDIR/EBOOT.BIN to games/<name>/root/EBOOT.BIN (see decrypt.sh)

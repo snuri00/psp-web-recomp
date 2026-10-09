@@ -11,7 +11,8 @@ set(PSPWEB_PRELOAD_DIR "" CACHE PATH
     "Emscripten only: host directory preloaded as /game (EBOOT.BIN, disc/, ms0/)")
 
 set(PSPWEB_GENERATED_DIR "${PSPWEB_DIR}/generated/${PSPWEB_GAME}")
-file(GLOB PSPWEB_GENERATED CONFIGURE_DEPENDS "${PSPWEB_GENERATED_DIR}/*.cpp")
+# Recursive: modules the game loads at run time are translated into modules/<name>.
+file(GLOB_RECURSE PSPWEB_GENERATED CONFIGURE_DEPENDS "${PSPWEB_GENERATED_DIR}/*.cpp")
 if(NOT PSPWEB_GENERATED)
     message(FATAL_ERROR "No generated AOT code in ${PSPWEB_GENERATED_DIR}; run scripts/generate.sh first")
 endif()
@@ -32,7 +33,11 @@ target_include_directories(pspweb_at3 PRIVATE "${PSPWEB_DIR}/third_party/at3_shi
 target_include_directories(pspweb_at3 PUBLIC "${PSPWEB_AT3_DIR}")
 target_compile_options(pspweb_at3 PRIVATE -O2 -w)
 
-add_executable(pspweb host/main.cpp host/kernel.cpp host/devices.cpp host/io.cpp host/pgd.cpp host/mpeg.cpp host/sas.cpp host/atrac.cpp host/savedata.cpp host/ge.cpp host/ge_gl.cpp host/ge_worker.cpp host/webfs.cpp)
+add_executable(pspweb host/main.cpp host/kernel.cpp host/devices.cpp host/io.cpp host/modules.cpp host/pgd.cpp host/mpeg.cpp host/sas.cpp host/atrac.cpp host/savedata.cpp host/ge.cpp host/ge_gl.cpp host/ge_worker.cpp host/webfs.cpp)
+# The table of translated run-time modules, or an empty one.
+if(NOT EXISTS "${PSPWEB_GENERATED_DIR}/modules_table.cpp")
+    target_sources(pspweb PRIVATE host/no_modules.cpp)
+endif()
 target_link_libraries(pspweb PRIVATE pspweb_generated psprecomp_core pspweb_at3)
 target_compile_definitions(pspweb PRIVATE PSPWEB_GUEST_PATH="${PSPWEB_GUEST_PATH}")
 target_compile_options(pspweb PRIVATE -Wall -Wextra)

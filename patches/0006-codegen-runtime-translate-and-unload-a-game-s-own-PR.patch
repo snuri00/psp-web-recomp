@@ -1,0 +1,232 @@
+From bbef4645f2782a4828487ae9f2388d01a4c5f2fd Mon Sep 17 00:00:00 2001
+From: Samir Nuri <samirnuri714@gmail.com>
+Date: Fri, 9 Oct 2026 15:36:12 +0200
+Subject: [PATCH] codegen, runtime: translate and unload a game's own PRX
+ modules
+
+Codegen gets --namespace, --unit-origin and --import-slot-base so module code links next to the executable; Runtime::unregister_functions forgets a module's functions when it is unloaded.
+---
+ include/psprecomp/runtime.hpp |  3 ++
+ src/runtime.cpp               | 24 +++++++++++
+ tools/codegen_main.cpp        | 80 ++++++++++++++++++++++++++---------
+ 3 files changed, 88 insertions(+), 19 deletions(-)
+
+diff --git a/include/psprecomp/runtime.hpp b/include/psprecomp/runtime.hpp
+index 6c426e0..a2a8fc4 100644
+--- a/include/psprecomp/runtime.hpp
++++ b/include/psprecomp/runtime.hpp
+@@ -81,6 +81,9 @@ public:
+     const NidRegistry &nids() const noexcept;
+ 
+     void register_function(std::uint32_t address, RecompiledFunction function, std::string name);
++    // Forgets every function and generated unit registered in [start, end), for
++    // a module that is unloaded so that another one can take its place.
++    void unregister_functions(std::uint32_t start, std::uint32_t end);
+     void register_hle(std::string library, std::uint32_t nid, HleFunction function);
+     [[nodiscard]] bool has_function(std::uint32_t address) const;
+     [[nodiscard]] std::size_t function_count() const noexcept;
+diff --git a/src/runtime.cpp b/src/runtime.cpp
+index c4c9d99..b418072 100644
+--- a/src/runtime.cpp
++++ b/src/runtime.cpp
+@@ -448,6 +448,30 @@ void Runtime::register_function(std::uint32_t address, RecompiledFunction functi
+     }
+ }
+ 
++void Runtime::unregister_functions(std::uint32_t start, std::uint32_t end) {
++    start = memory_.canonical(start);
++    end = memory_.canonical(end - 1u) + 1u;
++    for (auto it = functions_.begin(); it != functions_.end();) {
++        const std::uint32_t c = memory_.canonical(it->first);
++        it = c >= start && c < end ? functions_.erase(it) : std::next(it);
++    }
++    for (std::uint32_t c = start & ~3u; c < end; c += 4u) {
++        if (c < direct_base_) continue;
++        const std::size_t index = static_cast<std::size_t>(c - direct_base_) / 4u;
++        if (index >= direct_functions_.size()) break;
++        direct_functions_[index] = nullptr;
++        direct_chainable_[index] = nullptr;
++    }
++    if (generated_unit_span_ == 0u) return;
++    for (std::size_t unit = 0; unit < kGeneratedUnitFastCapacity; ++unit) {
++        const std::uint64_t unit_start = generated_unit_base_ + static_cast<std::uint64_t>(unit) * generated_unit_span_;
++        if (unit_start + generated_unit_span_ <= start || unit_start >= end) continue;
++        generated_units_[unit] = nullptr;
++        generated_unit_entries_[unit] = nullptr;
++        generated_unit_disabled_[unit] = 0u;
++    }
++}
++
+ Runtime::RecompiledFunction Runtime::lookup_function(std::uint32_t address) const noexcept {
+     const std::uint32_t c = memory_.canonical(address);
+     const std::uint32_t delta = c - direct_base_;
+diff --git a/tools/codegen_main.cpp b/tools/codegen_main.cpp
+index 2db2205..99c8b4a 100644
+--- a/tools/codegen_main.cpp
++++ b/tools/codegen_main.cpp
+@@ -1222,13 +1222,36 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
+     return body.str();
+ }
+ 
+-void write_import_wrappers(std::ostream &out, const std::vector<psprecomp::PspImport> &imports) {
++// Options for code of a module that is loaded at run time next to the main
++// executable (a PRX the game loads with sceKernelLoadModule).
++struct AutoOptions {
++    // Wraps everything in psprecomp::<name>, so several modules link together.
++    std::string module_namespace;
++    // Origin of the fixed-span unit numbering. Using the main executable's
++    // origin keeps the runtime's dense unit table valid for both.
++    std::uint32_t unit_origin{};
++    // First import cache slot; each linked module needs a range of its own.
++    std::uint32_t import_slot_base{};
++};
++
++std::string open_namespace(const AutoOptions &options) {
++    return options.module_namespace.empty() ? "namespace psprecomp {\n"
++                                            : "namespace psprecomp {\nnamespace " + options.module_namespace + " {\n";
++}
++
++std::string close_namespace(const AutoOptions &options) {
++    return options.module_namespace.empty() ? "} // namespace psprecomp\n"
++                                            : "} // namespace " + options.module_namespace + "\n} // namespace psprecomp\n";
++}
++
++void write_import_wrappers(std::ostream &out, const std::vector<psprecomp::PspImport> &imports,
++                           std::uint32_t slot_base = 0u) {
+     for (std::size_t i = 0; i < imports.size(); ++i) {
+         out << "static void import_" << i << "(Runtime &rt, AllegrexContext &ctx) {\n"
+             << "    const RuntimeExecutionContextToken caller_context = capture_runtime_execution_context();\n"
+             << "    const std::uint32_t import_pc = ctx.pc;\n"
+             << "    const std::uint32_t return_address = ctx.gpr[31];\n"
+-            << "    rt.invoke_import_cached(" << i << "u, \"" << cpp_escape(imports[i].library) << "\", "
++            << "    rt.invoke_import_cached(" << (slot_base + i) << "u, \"" << cpp_escape(imports[i].library) << "\", "
+             << psprecomp::hex32(imports[i].nid) << "u, ctx);\n"
+             << "    if (!rt.stopped() && runtime_execution_context_matches(caller_context) &&\n"
+             << "        ctx.pc == import_pc) ctx.pc = return_address;\n"
+@@ -1512,7 +1535,8 @@ bool write_text_if_changed(const std::filesystem::path &path, const std::string
+ int generate_auto(const std::filesystem::path &elf_path,
+                   const std::filesystem::path &output_dir,
+                   std::uint32_t load_base,
+-                  std::uint32_t unit_span_bytes) {
++                  std::uint32_t unit_span_bytes,
++                  const AutoOptions &options = {}) {
+     const auto elf = psprecomp::Elf32Image::from_file(elf_path);
+     psprecomp::GuestMemory memory;
+     (void)elf.load_and_relocate(memory, load_base);
+@@ -1524,7 +1548,10 @@ int generate_auto(const std::filesystem::path &elf_path,
+     if (program.executable_ranges.empty()) throw psprecomp::Error("ELF has no executable ranges");
+ 
+     std::filesystem::create_directories(output_dir);
+-    const std::uint32_t executable_base = program.executable_ranges.front().start;
++    const std::uint32_t executable_base =
++        options.unit_origin != 0u ? options.unit_origin : program.executable_ranges.front().start;
++    if (executable_base > program.executable_ranges.front().start)
++        throw psprecomp::Error("--unit-origin must not lie above the module's code");
+ 
+     // Emit every discovered guest instruction once. Function seeds remain analysis
+     // metadata and dispatcher entries, but overlapping CFGs no longer duplicate C++.
+@@ -1578,13 +1605,14 @@ int generate_auto(const std::filesystem::path &elf_path,
+     const auto units_header_path = output_dir / "generated_units.hpp";
+     std::ostringstream units_header;
+     units_header << "#pragma once\n\n#include <cstdint>\n#include \"psprecomp/guest_memory.hpp\"\n\nnamespace psprecomp {\nclass Runtime;\nstruct AllegrexContext;\n";
++    if (!options.module_namespace.empty()) units_header << "namespace " << options.module_namespace << " {\n";
+     for (const auto &unit : units) {
+         units_header << "void " << generated_unit_cpp_name(unit.bucket)
+                      << "(Runtime &, AllegrexContext &);\n";
+         units_header << "void " << generated_unit_cpp_entry_name(unit.bucket)
+                      << "(Runtime &, AllegrexContext &, std::uint16_t, GuestMemory::AotFastView &);\n";
+     }
+-    units_header << "} // namespace psprecomp\n";
++    units_header << close_namespace(options);
+     (void)write_text_if_changed(units_header_path, units_header.str());
+ 
+     std::set<std::filesystem::path> expected_cpp;
+@@ -1609,7 +1637,8 @@ int generate_auto(const std::filesystem::path &elf_path,
+         };
+ 
+         std::ostringstream out;
+-        out << "#include \"psprecomp/runtime.hpp\"\n#include \"generated_units.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
++        out << "#include \"psprecomp/runtime.hpp\"\n#include \"generated_units.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\n"
++            << open_namespace(options);
+         // The register-cache lowering passes (per-basic-block GPR/FPR caches and
+         // the cross-unit hot-register cache) are deliberately absent.  They kept
+         // large numbers of guest registers live in C++ locals and in a second
+@@ -1633,17 +1662,17 @@ int generate_auto(const std::filesystem::path &elf_path,
+                 << generated_unit.name << ", \"" << generated_unit.name << "\");\n";
+             ++registered_entries;
+         }
+-        out << "}\n} // namespace psprecomp\n";
++        out << "}\n" << close_namespace(options);
+         rewritten_units += write_text_if_changed(path, out.str()) ? 1u : 0u;
+     }
+ 
+     const auto registry_path = output_dir / "generated_registry.cpp";
+     expected_cpp.insert(registry_path.filename());
+     std::ostringstream registry;
+-    registry << "#include \"psprecomp/runtime.hpp\"\n#include <cstdint>\n\nnamespace psprecomp {\n";
++    registry << "#include \"psprecomp/runtime.hpp\"\n#include <cstdint>\n\n" << open_namespace(options);
+     for (const auto &unit : units) registry << "void register_generated_unit_" << unit.bucket << "(Runtime &runtime);\n";
+     registry << "\n";
+-    write_import_wrappers(registry, imports);
++    write_import_wrappers(registry, imports, options.import_slot_base);
+     registry << "void register_generated_functions(Runtime &runtime) {\n";
+     for (const auto &unit : units) registry << "    register_generated_unit_" << unit.bucket << "(runtime);\n";
+     for (std::size_t i = 0; i < imports.size(); ++i) {
+@@ -1651,7 +1680,7 @@ int generate_auto(const std::filesystem::path &elf_path,
+                  << "u, &import_" << i << ", \"" << cpp_escape(imports[i].library)
+                  << "::" << psprecomp::hex32(imports[i].nid) << "\");\n";
+     }
+-    registry << "}\n} // namespace psprecomp\n";
++    registry << "}\n" << close_namespace(options);
+     const bool registry_rewritten = write_text_if_changed(registry_path, registry.str());
+ 
+     for (const auto &entry : std::filesystem::directory_iterator(output_dir)) {
+@@ -1692,23 +1721,36 @@ int generate_auto(const std::filesystem::path &elf_path,
+ int main(int argc, char **argv) {
+     try {
+         if (argc >= 4 && std::string_view(argv[2]) == "--auto") {
+-            if (argc > 6) {
+-                std::cerr << "Usage: psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]\n";
+-                return 2;
++            // Positional load base and unit span, then optional module flags.
++            std::vector<std::string_view> positional;
++            AutoOptions options;
++            for (int i = 4; i < argc; ++i) {
++                const std::string_view arg = argv[i];
++                const bool has_value = i + 1 < argc;
++                if (arg == "--namespace" && has_value) options.module_namespace = argv[++i];
++                else if (arg == "--unit-origin" && has_value) options.unit_origin = static_cast<std::uint32_t>(std::stoul(argv[++i], nullptr, 0));
++                else if (arg == "--import-slot-base" && has_value) options.import_slot_base = static_cast<std::uint32_t>(std::stoul(argv[++i], nullptr, 0));
++                else if (!arg.starts_with("--") && positional.size() < 2u) positional.push_back(arg);
++                else {
++                    std::cerr << "Usage: psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]\n"
++                                 "         [--namespace name] [--unit-origin address] [--import-slot-base n]\n";
++                    return 2;
++                }
+             }
+-            const std::uint32_t load_base = argc >= 5
+-                ? static_cast<std::uint32_t>(std::stoul(argv[4], nullptr, 0))
++            const std::uint32_t load_base = !positional.empty()
++                ? static_cast<std::uint32_t>(std::stoul(std::string(positional[0]), nullptr, 0))
+                 : psprecomp::kDefaultPspUserLoadBase;
+-            const std::uint32_t unit_span = argc >= 6
+-                ? static_cast<std::uint32_t>(std::stoul(argv[5], nullptr, 0))
++            const std::uint32_t unit_span = positional.size() >= 2u
++                ? static_cast<std::uint32_t>(std::stoul(std::string(positional[1]), nullptr, 0))
+                 : 0x20000u;
+             if (unit_span == 0u || (unit_span & 3u) != 0u) throw psprecomp::Error("unit_span_bytes must be non-zero and 4-byte aligned");
+-            return generate_auto(argv[1], argv[3], load_base, unit_span);
++            return generate_auto(argv[1], argv[3], load_base, unit_span, options);
+         }
+         if (argc == 4) return generate_manual(argv[1], argv[2], argv[3]);
+         std::cerr << "Usage:\n"
+                   << "  psp_recomp <ELF> <functions.csv> <generated_manifest.cpp>\n"
+-                  << "  psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]\n";
++                  << "  psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]\n"
++                  << "         [--namespace name] [--unit-origin address] [--import-slot-base n]\n";
+         return 2;
+     } catch (const std::exception &e) {
+         std::cerr << "psp_recomp error: " << e.what() << "\n";
+-- 
+2.43.0
+
