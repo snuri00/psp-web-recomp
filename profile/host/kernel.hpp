@@ -189,6 +189,7 @@ public:
     // Receives the mixed 44.1 kHz stereo output once per frame.
     using AudioSink = void (*)(const std::int16_t *samples, std::uint32_t frames);
     void set_audio_sink(AudioSink sink) { audio_sink_ = sink; }
+    void savedata_choose(int index);
 
 private:
     using Ctx = psprecomp::AllegrexContext;
@@ -357,9 +358,6 @@ private:
     void sceUmdCheckMedium(Ctx &ctx);
     void sceImposeGetLanguageMode(Ctx &ctx);
     void sceDisplayGetFramePerSec(Ctx &ctx);
-    void sceUtilitySavedataInitStart(Ctx &ctx);
-    void sceUtilitySavedataGetStatus(Ctx &ctx);
-    void sceUtilitySavedataShutdownStart(Ctx &ctx);
     void sceUtilityMsgDialogInitStart(Ctx &ctx);
     void sceUtilityMsgDialogGetStatus(Ctx &ctx);
     void sceUtilityMsgDialogShutdownStart(Ctx &ctx);
@@ -404,11 +402,12 @@ private:
     std::vector<std::int16_t> mix_out_;
     std::shared_ptr<void> sas_;             // sas.cpp state
     void install_atrac();    // atrac.cpp: ATRAC3/ATRAC3+ streams (music, speech)
+    void install_savedata();
+    std::shared_ptr<void> savedata_;
     std::shared_ptr<void> atrac_;           // atrac.cpp state
     std::array<AudioChannel, 8> audio_channels_{};
     AudioChannel audio_output2_{};
     AudioSink audio_sink_{};
-    UtilityDialog savedata_dialog_{};
     UtilityDialog msg_dialog_{};
     std::uint32_t pad_buttons_{};
     std::uint8_t pad_lx_{128u};

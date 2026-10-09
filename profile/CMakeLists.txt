@@ -32,7 +32,7 @@ target_include_directories(pspweb_at3 PRIVATE "${PSPWEB_DIR}/third_party/at3_shi
 target_include_directories(pspweb_at3 PUBLIC "${PSPWEB_AT3_DIR}")
 target_compile_options(pspweb_at3 PRIVATE -O2 -w)
 
-add_executable(pspweb host/main.cpp host/kernel.cpp host/devices.cpp host/io.cpp host/pgd.cpp host/mpeg.cpp host/sas.cpp host/atrac.cpp host/ge.cpp host/ge_gl.cpp host/ge_worker.cpp host/webfs.cpp)
+add_executable(pspweb host/main.cpp host/kernel.cpp host/devices.cpp host/io.cpp host/pgd.cpp host/mpeg.cpp host/sas.cpp host/atrac.cpp host/savedata.cpp host/ge.cpp host/ge_gl.cpp host/ge_worker.cpp host/webfs.cpp)
 target_link_libraries(pspweb PRIVATE pspweb_generated psprecomp_core pspweb_at3)
 target_compile_definitions(pspweb PRIVATE PSPWEB_GUEST_PATH="${PSPWEB_GUEST_PATH}")
 target_compile_options(pspweb PRIVATE -Wall -Wextra)
@@ -63,6 +63,7 @@ if(EMSCRIPTEN)
         -sPTHREAD_POOL_SIZE=2
         -sDEFAULT_PTHREAD_STACK_SIZE=2097152
         -sOFFSCREENCANVAS_SUPPORT=1
+        -lidbfs.js
         "-sEXPORTED_FUNCTIONS=_main,_malloc,_free"
         -sMIN_WEBGL_VERSION=2
         -sMAX_WEBGL_VERSION=2

@@ -257,6 +257,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_set_pad(std::uint32_t buttons, std::
     if (g_session.kernel) g_session.kernel->set_pad(buttons, static_cast<std::uint8_t>(lx), static_cast<std::uint8_t>(ly));
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE void pspweb_save_choice(int index) {
+    if (g_session.kernel) g_session.kernel->savedata_choose(index);
+}
+
 namespace {
 // Creates the WebGL2 context on the calling thread (the GE thread when there
 // is one: the canvas has been handed to it) and the GL renderer.

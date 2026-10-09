@@ -342,6 +342,7 @@ void Kernel::install(const std::vector<psprecomp::PspImport> &imports) {
     install_mpeg();
     install_sas();
     install_atrac();
+    install_savedata();
     for (const auto &import : imports) install_fallback(import);
 }
 

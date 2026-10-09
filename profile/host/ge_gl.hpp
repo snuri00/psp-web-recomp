@@ -100,6 +100,7 @@ public:
         indices_.push_back(c);
     }
     void flush();
+    void forget_texture(const void *identity);
 
     // Keep guest VRAM and surfaces coherent around a block transfer.
     void before_transfer(const TransferRect &src, const TransferRect &dst);

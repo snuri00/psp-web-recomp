@@ -141,6 +141,25 @@
     body.immersive .dpad { width: 105px; height: 105px; grid-template-columns: repeat(3, 35px); grid-template-rows: repeat(3, 35px); }
     body.immersive .stick { width: 115px; height: 115px; }
   }
+  .saves { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.55); padding: 12px; }
+  .saves[hidden] { display: none; }
+  .saves-panel {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; width: min(520px, 100%);
+    max-height: 100%; display: flex; flex-direction: column; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+  }
+  .saves-title { font-weight: 600; padding: 14px 16px 8px; }
+  .saves-list { list-style: none; margin: 0; padding: 0 8px; overflow-y: auto; flex: 1; }
+  .slot { display: flex; gap: 12px; align-items: center; padding: 8px; border-radius: 8px; cursor: pointer; border: 2px solid transparent; }
+  .slot.sel { border-color: var(--accent); background: var(--ctl); }
+  .slot-icon { width: 96px; height: 54px; flex: none; border-radius: 4px; background: var(--ctl); object-fit: cover; }
+  .slot-text { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+  .slot-text span { color: var(--muted); font-size: 13px; white-space: pre-line; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .slot-text small { color: var(--muted); font-size: 12px; }
+  .saves-actions { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 16px 6px; }
+  .saves-actions button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; }
+  .saves-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .saves-hint { color: var(--muted); font-size: 12px; padding: 0 16px 12px; text-align: right; }
+  body.immersive #export-saves, body.immersive #import-saves, body.immersive #note { display: none; }
 </style>
 </head>
 <body>
@@ -152,6 +171,7 @@
     <span id="status" class="status">Loading…</span>
     <span id="fps" class="meta"></span>
     <span id="profile" class="meta" hidden></span>
+    <span id="note" class="meta"></span>
     <span class="actions">
       <select id="scale" aria-label="Resolution" title="Internal resolution">
         <option value="1">480×272</option>
@@ -159,10 +179,24 @@
         <option value="3">1440×816</option>
         <option value="4">1920×1088</option>
       </select>
+      <button id="export-saves" type="button" title="Download your saves as a ZIP file">Export saves</button>
+      <button id="import-saves" type="button" title="Add saves from a ZIP file">Import saves</button>
+      <input id="import-file" type="file" accept=".zip,application/zip" hidden>
       <button id="sound" type="button">Mute</button>
       <button id="controls-toggle" type="button" hidden>Hide controls</button>
       <button id="fullscreen" type="button">Fullscreen</button>
     </span>
+  </div>
+  <div id="saves" class="saves" hidden role="dialog" aria-modal="true" aria-labelledby="saves-title">
+    <div class="saves-panel">
+      <div id="saves-title" class="saves-title"></div>
+      <ul id="saves-list" class="saves-list"></ul>
+      <div class="saves-actions">
+        <button id="saves-cancel" type="button">Cancel</button>
+        <button id="saves-ok" type="button" class="primary"></button>
+      </div>
+      <div class="saves-hint">Arrows to choose, Enter or ✕ to confirm, Esc or ○ to cancel</div>
+    </div>
   </div>
   <div id="touch" class="controls" aria-hidden="true">
     <div class="cluster left">
@@ -206,6 +240,20 @@
     logEl.scrollTop = logEl.scrollHeight;
   }
   var frames = 0, cpuTotal = 0, stepTotal = 0, lastFps = performance.now(), image = null;
+  var SAVE_ROOT = '/game/ms0/PSP/SAVEDATA';
+  function mountSaves() {
+    try {
+      FS.mkdirTree(SAVE_ROOT);
+      FS.mount(IDBFS, {}, SAVE_ROOT);
+      addRunDependency('saves');
+      FS.syncfs(true, function (err) {
+        if (err) console.warn('saves: could not read browser storage', err);
+        removeRunDependency('saves');
+      });
+    } catch (e) {
+      console.warn('saves: browser storage is not available', e);
+    }
+  }
   // Which GPU the browser draws with (software renderers make high resolutions slow).
   (function () {
     try {
@@ -219,7 +267,7 @@
   var Module = {
     canvas: document.getElementById('canvas'),
     // ?profile: per-frame timing breakdown in the log (see README).
-    preRun: /[?&]profile\b/.test(location.search) ? [function () { ENV.PSPWEB_FRAME_PROFILE = '1'; }] : [],
+    preRun: [mountSaves].concat(/[?&]profile\b/.test(location.search) ? [function () { ENV.PSPWEB_FRAME_PROFILE = '1'; }] : []),
     print: function (text) { console.log(text); appendLog(text); },
     printErr: function (text) { console.warn(text); appendLog(text); },
     setStatus: function (text) { if (text) statusEl.textContent = text; },
@@ -241,6 +289,7 @@
     pspProfile: function (text) {
       var el = document.getElementById('profile');
       el.hidden = false;
+      if (sound.stats) text += ' | audio ' + Math.round(sound.stats.queued / 44.1) + ' ms queued, ' + sound.stats.under + ' underruns';
       el.textContent = text;
     },
     pspFrame: function (cpuMs, steps) {
@@ -261,7 +310,12 @@
                KeyA: 0x8000, KeyS: 0x1000, KeyQ: 0x100, KeyW: 0x200, Enter: 0x8, ShiftLeft: 0x1, ShiftRight: 0x1 };
   var STICK = { KeyJ: [-1, 0], KeyL: [1, 0], KeyI: [0, -1], KeyK: [0, 1] };
   var held = {};
+  var saveUi = { info: null, index: 0, confirming: false, urls: [] };
   function onKey(e, down) {
+    if (saveUi.info) {
+      if (down && saveKey(e.code)) e.preventDefault();
+      return;
+    }
     if (!(e.code in KEYS) && !(e.code in STICK)) return;
     held[e.code] = down; e.preventDefault();
   }
@@ -406,7 +460,7 @@
     '  constructor(options) {',
     '    super();',
     '    this.queue = []; this.pos = 0; this.frames = 0; this.primed = false;',
-    '    this.step = 44100 / options.processorOptions.rate;',
+    '    this.base = 44100 / options.processorOptions.rate; this.drift = 0; this.target = 4410; this.under = 0; this.blocks = 0;',
     '    this.port.onmessage = (e) => {',
     '      this.queue.push(e.data); this.frames += e.data.length / 2;',
     '      while (this.frames > 44100 * 0.25 && this.queue.length > 1) {',
@@ -416,15 +470,20 @@
     '  }',
     '  process(inputs, outputs) {',
     '    const left = outputs[0][0], right = outputs[0][1] || outputs[0][0];',
+    '    if (++this.blocks % 344 === 0) this.port.postMessage({ queued: this.frames, under: this.under });',
     '    if (!this.primed) { if (this.frames < 2048) { left.fill(0); right.fill(0); return true; } this.primed = true; }',
+    '    const error = Math.max(-1, Math.min(1, (this.frames - this.target) / this.target));',
+    '    this.drift = Math.max(-0.008, Math.min(0.008, this.drift + error * 0.00000025));',
+    '    const step = this.base * (1 + Math.max(-0.01, Math.min(0.01, this.drift + error * 0.004)));',
     '    for (let i = 0; i < left.length; i++) {',
     '      const chunk = this.queue[0];',
-    '      if (!chunk) { left[i] = right[i] = 0; this.primed = false; continue; }',
-    '      const at = Math.floor(this.pos) * 2;',
-    '      left[i] = chunk[at]; right[i] = chunk[at + 1];',
-    '      const before = Math.floor(this.pos);',
-    '      this.pos += this.step;',
-    '      this.frames -= Math.floor(this.pos) - before;',
+    '      if (!chunk) { left[i] = right[i] = 0; if (this.primed) this.under++; this.primed = false; continue; }',
+    '      const whole = Math.floor(this.pos), at = whole * 2, f = this.pos - whole;',
+    '      const next = at + 2 < chunk.length ? chunk : this.queue[1], n = at + 2 < chunk.length ? at + 2 : 0;',
+    '      const l = chunk[at], r = chunk[at + 1];',
+    '      left[i] = next ? l + (next[n] - l) * f : l; right[i] = next ? r + (next[n + 1] - r) * f : r;',
+    '      this.pos += step;',
+    '      this.frames -= Math.floor(this.pos) - whole;',
     '      if (this.pos * 2 >= chunk.length) { this.pos -= chunk.length / 2; this.queue.shift(); }',
     '    }',
     '    return true;',
@@ -449,6 +508,7 @@
     sound.context.audioWorklet.addModule(url).then(function () {
       sound.node = new AudioWorkletNode(sound.context, 'psp-output',
         { outputChannelCount: [2], processorOptions: { rate: sound.context.sampleRate } });
+      sound.node.port.onmessage = function (e) { sound.stats = e.data; };
       sound.gain = sound.context.createGain();
       sound.gain.gain.value = sound.muted ? 0 : 1;
       sound.node.connect(sound.gain).connect(sound.context.destination);
@@ -472,8 +532,30 @@
   };
 
   var PAD_BUTTONS = [0x4000, 0x2000, 0x8000, 0x1000, 0x100, 0x200, 0, 0, 0x1, 0x8, 0, 0, 0x10, 0x40, 0x80, 0x20];
+  var padPrev = { nav: 0, ok: false, back: false }, padQuiet = false;
+  function pollSaveDialog(pads) {
+    var nav = 0, ok = false, back = false;
+    for (var i = 0; i < pads.length; i++) {
+      var p = pads[i]; if (!p) continue;
+      if ((p.buttons[12] && p.buttons[12].pressed) || p.axes[1] < -0.5) nav = -1;
+      if ((p.buttons[13] && p.buttons[13].pressed) || p.axes[1] > 0.5) nav = 1;
+      ok = ok || (p.buttons[0] && p.buttons[0].pressed);
+      back = back || (p.buttons[1] && p.buttons[1].pressed);
+    }
+    if (nav && nav !== padPrev.nav) moveSave(nav);
+    if (ok && !padPrev.ok) confirmSave();
+    else if (back && !padPrev.back) cancelSave();
+    padPrev = { nav: nav, ok: ok, back: back };
+  }
   function pollInput() {
     var buttons = touchPad.buttons, ax = 0, ay = 0;
+    if (saveUi.info) {
+      pollSaveDialog(navigator.getGamepads ? navigator.getGamepads() : []);
+      padQuiet = true;
+      if (Module._pspweb_set_pad) Module._pspweb_set_pad(0, 128, 128);
+      requestAnimationFrame(pollInput);
+      return;
+    }
     for (var code in held) if (held[code]) {
       if (code in KEYS) buttons |= KEYS[code];
       if (code in STICK) { ax += STICK[code][0]; ay += STICK[code][1]; }
@@ -487,6 +569,10 @@
       if (Math.abs(p.axes[1]) > 0.15) ay = p.axes[1];
     }
     applyScale();
+    if (padQuiet) {
+      if (buttons === 0) padQuiet = false;
+      buttons = 0;
+    }
     if (Module._pspweb_set_pad) {
       var lx = Math.max(0, Math.min(255, Math.round(128 + ax * 127)));
       var ly = Math.max(0, Math.min(255, Math.round(128 + ay * 127)));
@@ -495,6 +581,218 @@
     requestAnimationFrame(pollInput);
   }
   requestAnimationFrame(pollInput);
+
+  var noteEl = document.getElementById('note'), noteTimer = 0;
+  function note(text) {
+    noteEl.textContent = text;
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(function () { noteEl.textContent = ''; }, 6000);
+  }
+  var syncTimer = 0;
+  function storeSaves() {
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(function () {
+      try {
+        FS.syncfs(false, function (err) { if (err) console.warn('saves: could not write browser storage', err); });
+      } catch (e) {}
+    }, 300);
+  }
+  Module.pspSavesChanged = storeSaves;
+
+  var savesEl = document.getElementById('saves'), savesList = document.getElementById('saves-list');
+  var savesTitle = document.getElementById('saves-title'), savesOk = document.getElementById('saves-ok');
+  var SAVE_WORDS = { load: ['Load game', 'Load'], save: ['Save game', 'Save'], delete: ['Delete saved data', 'Delete'] };
+  function saveIcon(dir) {
+    try {
+      var url = URL.createObjectURL(new Blob([FS.readFile(SAVE_ROOT + '/' + dir + '/ICON0.PNG')], { type: 'image/png' }));
+      saveUi.urls.push(url);
+      return url;
+    } catch (e) {
+      return null;
+    }
+  }
+  function renderSaves() {
+    var info = saveUi.info;
+    saveUi.urls.forEach(function (url) { URL.revokeObjectURL(url); });
+    saveUi.urls = [];
+    savesList.textContent = '';
+    info.slots.forEach(function (slot, i) {
+      var li = document.createElement('li');
+      li.className = 'slot' + (i === saveUi.index ? ' sel' : '');
+      var icon = slot.exists ? saveIcon(info.game + slot.name) : null;
+      var pic = document.createElement(icon ? 'img' : 'div');
+      pic.className = 'slot-icon';
+      if (icon) { pic.src = icon; pic.alt = ''; }
+      var text = document.createElement('div');
+      text.className = 'slot-text';
+      var head = document.createElement('b');
+      head.textContent = slot.exists ? (slot.subtitle || slot.title || slot.name) : 'New save';
+      var detail = document.createElement('span');
+      detail.textContent = slot.exists ? slot.detail : slot.name;
+      var when = document.createElement('small');
+      when.textContent = slot.exists && slot.time ? new Date(slot.time * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '';
+      text.append(head, detail, when);
+      li.append(pic, text);
+      li.addEventListener('click', function () {
+        if (saveUi.index === i) { confirmSave(); return; }
+        saveUi.index = i;
+        saveUi.confirming = false;
+        renderSaves();
+      });
+      savesList.appendChild(li);
+    });
+    var words = SAVE_WORDS[info.mode] || SAVE_WORDS.load;
+    savesTitle.textContent = saveUi.confirming ? (info.mode === 'delete' ? 'Delete this save?' : 'Overwrite this save?') : words[0];
+    savesOk.textContent = saveUi.confirming ? (info.mode === 'delete' ? 'Delete' : 'Overwrite') : words[1];
+    var selected = savesList.children[saveUi.index];
+    if (selected) selected.scrollIntoView({ block: 'nearest' });
+  }
+  function closeSaves(choice) {
+    savesEl.hidden = true;
+    saveUi.urls.forEach(function (url) { URL.revokeObjectURL(url); });
+    saveUi = { info: null, index: 0, confirming: false, urls: [] };
+    if (Module._pspweb_save_choice) Module._pspweb_save_choice(choice);
+  }
+  function confirmSave() {
+    var info = saveUi.info, slot = info.slots[saveUi.index];
+    if (!saveUi.confirming && (info.mode === 'delete' || (info.mode === 'save' && slot.exists))) {
+      saveUi.confirming = true;
+      renderSaves();
+      return;
+    }
+    closeSaves(saveUi.index);
+  }
+  function cancelSave() {
+    if (saveUi.confirming) {
+      saveUi.confirming = false;
+      renderSaves();
+      return;
+    }
+    closeSaves(-1);
+  }
+  function moveSave(step) {
+    var n = saveUi.info.slots.length;
+    saveUi.index = (saveUi.index + step + n) % n;
+    saveUi.confirming = false;
+    renderSaves();
+  }
+  function saveKey(code) {
+    if (code === 'ArrowUp' || code === 'KeyI') moveSave(-1);
+    else if (code === 'ArrowDown' || code === 'KeyK') moveSave(1);
+    else if (code === 'Enter' || code === 'KeyZ' || code === 'Space') confirmSave();
+    else if (code === 'Escape' || code === 'KeyX' || code === 'Backspace') cancelSave();
+    else return false;
+    return true;
+  }
+  Module.pspSaveDialog = function (info) {
+    held = {};
+    padPrev = { nav: 0, ok: true, back: true };
+    saveUi = { info: info, index: Math.max(0, Math.min(info.focus, info.slots.length - 1)), confirming: false, urls: [] };
+    renderSaves();
+    savesEl.hidden = false;
+  };
+  savesOk.addEventListener('click', function () { if (saveUi.info) confirmSave(); });
+  document.getElementById('saves-cancel').addEventListener('click', function () { if (saveUi.info) cancelSave(); });
+
+  var CRC_TABLE = (function () {
+    var table = new Uint32Array(256);
+    for (var n = 0; n < 256; n++) {
+      var c = n;
+      for (var k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      table[n] = c >>> 0;
+    }
+    return table;
+  })();
+  function crc32(data) {
+    var c = 0xFFFFFFFF;
+    for (var i = 0; i < data.length; i++) c = CRC_TABLE[(c ^ data[i]) & 255] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+  function saveFiles(dir, prefix, out) {
+    FS.readdir(dir).forEach(function (name) {
+      if (name === '.' || name === '..') return;
+      var path = dir + '/' + name, relative = prefix ? prefix + '/' + name : name;
+      if (FS.isDir(FS.stat(path).mode)) saveFiles(path, relative, out);
+      else out.push({ name: relative, data: FS.readFile(path) });
+    });
+    return out;
+  }
+  function makeZip(files) {
+    var encoder = new TextEncoder(), parts = [], central = [], offset = 0, now = new Date();
+    var time = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    var date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    files.forEach(function (f) {
+      var name = encoder.encode(f.name), crc = crc32(f.data), local = new DataView(new ArrayBuffer(30)), entry = new DataView(new ArrayBuffer(46));
+      local.setUint32(0, 0x04034b50, true); local.setUint16(4, 20, true); local.setUint16(6, 0x800, true);
+      local.setUint16(10, time, true); local.setUint16(12, date, true); local.setUint32(14, crc, true);
+      local.setUint32(18, f.data.length, true); local.setUint32(22, f.data.length, true); local.setUint16(26, name.length, true);
+      entry.setUint32(0, 0x02014b50, true); entry.setUint16(4, 20, true); entry.setUint16(6, 20, true); entry.setUint16(8, 0x800, true);
+      entry.setUint16(12, time, true); entry.setUint16(14, date, true); entry.setUint32(16, crc, true);
+      entry.setUint32(20, f.data.length, true); entry.setUint32(24, f.data.length, true); entry.setUint16(28, name.length, true);
+      entry.setUint32(42, offset, true);
+      parts.push(local, name, f.data);
+      central.push(entry, name);
+      offset += 30 + name.length + f.data.length;
+    });
+    var size = central.reduce(function (n, part) { return n + part.byteLength; }, 0), end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+    end.setUint32(12, size, true); end.setUint32(16, offset, true);
+    return new Blob(parts.concat(central, [end]), { type: 'application/zip' });
+  }
+  async function readZip(buffer) {
+    var view = new DataView(buffer), bytes = new Uint8Array(buffer), end = -1, files = [], decoder = new TextDecoder();
+    for (var i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--)
+      if (view.getUint32(i, true) === 0x06054b50) { end = i; break; }
+    if (end < 0) throw new Error('this is not a ZIP file');
+    var count = view.getUint16(end + 10, true), at = view.getUint32(end + 16, true);
+    for (var n = 0; n < count; n++) {
+      if (view.getUint32(at, true) !== 0x02014b50) throw new Error('the ZIP file is damaged');
+      var method = view.getUint16(at + 10, true), packed = view.getUint32(at + 20, true), nameLength = view.getUint16(at + 28, true);
+      var name = decoder.decode(bytes.subarray(at + 46, at + 46 + nameLength)), local = view.getUint32(at + 42, true);
+      at += 46 + nameLength + view.getUint16(at + 30, true) + view.getUint16(at + 32, true);
+      var start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+      var data = bytes.slice(start, start + packed);
+      if (method === 8) data = new Uint8Array(await new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+      else if (method !== 0) throw new Error(name + ' uses an unsupported compression method');
+      files.push({ name: name, data: data });
+    }
+    return files;
+  }
+  document.getElementById('export-saves').addEventListener('click', function () {
+    var files = [];
+    try { files = saveFiles(SAVE_ROOT, '', []); } catch (e) {}
+    if (!files.length) { note('No saves yet'); return; }
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(makeZip(files));
+    link.download = 'psp-saves-' + new Date().toISOString().slice(0, 10) + '.zip';
+    link.click();
+    setTimeout(function () { URL.revokeObjectURL(link.href); }, 10000);
+  });
+  var importInput = document.getElementById('import-file');
+  document.getElementById('import-saves').addEventListener('click', function () { importInput.click(); });
+  importInput.addEventListener('change', async function () {
+    var file = importInput.files[0];
+    importInput.value = '';
+    if (!file) return;
+    try {
+      var saves = {}, written = 0;
+      (await readZip(await file.arrayBuffer())).forEach(function (f) {
+        var parts = f.name.replace(/\\/g, '/').split('/').filter(Boolean);
+        var at = parts.map(function (part) { return part.toUpperCase(); }).lastIndexOf('SAVEDATA');
+        if (at >= 0) parts = parts.slice(at + 1);
+        if (parts.length !== 2 || /\/$/.test(f.name)) return;
+        FS.mkdirTree(SAVE_ROOT + '/' + parts[0]);
+        FS.writeFile(SAVE_ROOT + '/' + parts[0] + '/' + parts[1], f.data);
+        saves[parts[0]] = true;
+        written++;
+      });
+      storeSaves();
+      var count = Object.keys(saves).length;
+      note(count ? 'Imported ' + count + (count === 1 ? ' save' : ' saves') + ' (' + written + ' files)' : 'No saves found in that file');
+    } catch (e) {
+      note('Import failed: ' + e.message);
+    }
+  });
 </script>
 {{{ SCRIPT }}}
 </body>

@@ -20,7 +20,6 @@ constexpr std::uint32_t kErrorUnknownThread = 0x80020198u;
 constexpr std::uint32_t kErrorUnknownEventFlag = 0x8002019Au;
 constexpr std::uint32_t kErrorAudioChannelNotReserved = 0x80260008u;
 constexpr std::uint32_t kErrorAudioNoChannel = 0x80260002u;
-constexpr std::uint32_t kErrorSavedataLoadNoData = 0x80110307u;
 constexpr std::uint32_t kAudioRate = 44100u;
 
 std::uint32_t align_up(std::uint32_t value, std::uint32_t alignment) {
@@ -71,10 +70,6 @@ void Kernel::install_devices() {
     hle("Kernel_Library", 0xB55249D2u, "sceKernelIsCpuIntrEnable", &Kernel::return_one);
 
     const char *util = "sceUtility";
-    hle(util, 0x50C4CD57u, "sceUtilitySavedataInitStart", &Kernel::sceUtilitySavedataInitStart);
-    hle(util, 0x8874DBE0u, "sceUtilitySavedataGetStatus", &Kernel::sceUtilitySavedataGetStatus);
-    hle(util, 0xD4B95FFBu, "sceUtilitySavedataUpdate", &Kernel::return_zero);
-    hle(util, 0x9790B33Cu, "sceUtilitySavedataShutdownStart", &Kernel::sceUtilitySavedataShutdownStart);
     hle(util, 0x2AD8E239u, "sceUtilityMsgDialogInitStart", &Kernel::sceUtilityMsgDialogInitStart);
     hle(util, 0x9A1C91D7u, "sceUtilityMsgDialogGetStatus", &Kernel::sceUtilityMsgDialogGetStatus);
     hle(util, 0x95FC253Bu, "sceUtilityMsgDialogUpdate", &Kernel::return_zero);
@@ -323,7 +318,7 @@ void Kernel::sceRtcGetCurrentClockLocalTime(Ctx &ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// sceUtility dialogs: report success without UI.  Loads find no save data.
+// sceUtility dialogs: report success without UI.
 
 void Kernel::dialog_get_status(Ctx &ctx, UtilityDialog &dialog) {
     const std::uint32_t status = dialog.status;
@@ -331,26 +326,6 @@ void Kernel::dialog_get_status(Ctx &ctx, UtilityDialog &dialog) {
     else if (dialog.status == 2u) dialog.status = 3u;
     else if (dialog.status == 4u) dialog.status = 0u;
     finish(ctx, status);
-}
-
-void Kernel::sceUtilitySavedataInitStart(Ctx &ctx) {
-    const std::uint32_t params = ctx.gpr[4];
-    const std::uint32_t mode = rt_.memory().load32(params + 0x30u);
-    const std::string game = read_string(params + 0x3Cu, 13);
-    const std::string save = read_string(params + 0x4Cu, 20);
-    std::cerr << "[utility] savedata mode=" << mode << " game=" << game << " save=" << save << "\n";
-    // Loads (autoload/load/list-load) report "no data"; everything else succeeds.
-    const bool load = mode == 0u || mode == 2u || mode == 4u;
-    rt_.memory().store32(params + 0x1Cu, load ? kErrorSavedataLoadNoData : 0u);
-    savedata_dialog_ = UtilityDialog{1u, params};
-    finish(ctx, 0u);
-}
-
-void Kernel::sceUtilitySavedataGetStatus(Ctx &ctx) { dialog_get_status(ctx, savedata_dialog_); }
-
-void Kernel::sceUtilitySavedataShutdownStart(Ctx &ctx) {
-    savedata_dialog_.status = 4u;
-    finish(ctx, 0u);
 }
 
 void Kernel::sceUtilityMsgDialogInitStart(Ctx &ctx) {

@@ -1227,10 +1227,7 @@ void Ge::bind_texture() {
         return;
     }
     if (found == textures_.end()) {
-        if (texture_cache_texels_ + width * height > kTextureCacheTexelLimit) {
-            textures_.clear();
-            texture_cache_texels_ = 0u;
-        }
+        if (texture_cache_texels_ + width * height > kTextureCacheTexelLimit) evict_textures(width * height);
         found = textures_.emplace(key, CachedTexture{}).first;
         texture_cache_texels_ += width * height;
     }
@@ -1244,6 +1241,22 @@ void Ge::bind_texture() {
     cached.frame = frame_;
     cached.vram_generation = stamp;
     texture_ = &cached;
+}
+
+void Ge::evict_textures(std::uint64_t need) {
+    if (gl_ != nullptr) gl_->flush();
+    std::vector<std::pair<std::uint32_t, TextureKey>> order;
+    order.reserve(textures_.size());
+    for (const auto &[key, texture] : textures_) order.emplace_back(texture.frame, key);
+    std::sort(order.begin(), order.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+    const std::uint64_t goal = kTextureCacheTexelLimit * 3u / 4u;
+    for (const auto &[frame, key] : order) {
+        if (texture_cache_texels_ + need <= goal) break;
+        const auto it = textures_.find(key);
+        if (gl_ != nullptr) gl_->forget_texture(&it->second);
+        texture_cache_texels_ -= static_cast<std::uint64_t>(key.width) * key.height;
+        textures_.erase(it);
+    }
 }
 
 void Ge::dump_texture(const CachedTexture &texture, std::uint32_t address, std::uint32_t format, std::uint32_t width,

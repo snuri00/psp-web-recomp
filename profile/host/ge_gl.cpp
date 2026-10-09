@@ -1167,6 +1167,14 @@ GLuint GeGl::texture_for_state(Surface *source, int ox, int oy) {
     return texture.id;
 }
 
+void GeGl::forget_texture(const void *identity) {
+    const auto it = textures_.find(identity);
+    if (it == textures_.end()) return;
+    if (cache_.texture == it->second.id) cache_.texture = ~0u;
+    glDeleteTextures(1, &it->second.id);
+    textures_.erase(it);
+}
+
 void GeGl::apply_state() {
     const GlDrawState &s = state_;
     int ox = 0, oy = 0;

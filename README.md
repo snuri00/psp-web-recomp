@@ -18,7 +18,7 @@ No game data is included here. You bring a disc image of a game you own, and the
 
 **Recompilation.** [PSPRecomp](https://github.com/jessicanataliagta/PSPRecomp) analyses the decrypted executable, finds its functions and emits C++ for them in translation units of 16 KiB of guest code each. That code runs against a register file and a model of the PSP's memory. This project adds a handful of fixes to PSPRecomp (in `patches/`) and a new target for it, the web profile in `profile/`.
 
-**A small PSP kernel.** Whatever the game asks of the PSP's operating system is answered by high-level emulation in `profile/host`: cooperative threads with semaphores, event flags and callbacks, memory partitions, the file system (with disc data streamed over HTTP Range requests, so only the executable is downloaded up front), the controller, audio output, the save data and message dialogs, and the movie player's bookkeeping. Guest time advances in frames, so a game sees a steady 60 Hz however fast the host runs.
+**A small PSP kernel.** Whatever the game asks of the PSP's operating system is answered by high-level emulation in `profile/host`: cooperative threads with semaphores, event flags and callbacks, memory partitions, the file system (with disc data streamed over HTTP Range requests, so only the executable is downloaded up front), the controller, audio output, saving and loading game progress, message dialogs, and the movie player's bookkeeping. Guest time advances in frames, so a game sees a steady 60 Hz however fast the host runs.
 
 **Graphics.** The GE, the PSP's graphics chip, is fed display lists. `ge.cpp` decodes them on the CPU, including vertex formats, skinning, lighting, texture generation, clipping and backface culling, and hands batched triangles and render state to `ge_gl.cpp`. There, framebuffers become WebGL render targets keyed by their place in VRAM, so effects that render to a texture and read it back stay on the GPU. Pixel format reinterpretation (games read 32-bit buffers as 16-bit textures and back), the PSP's stencil-in-alpha, fog and block transfers are emulated on the GPU as well, and everything can render at one to four times the native 480×272.
 
@@ -64,6 +64,12 @@ scripts/serve.sh mygame                            # http://localhost:8613/
 Executables on retail discs are encrypted. `PSP_DECRYPT` names any tool that is called as `tool <in> <out>` and writes a plain ELF, such as DecEboot or pspdecrypt. PPSSPP can also dump a decrypted executable while it runs a game (Settings, Tools, Developer tools).
 
 Set your expectations accordingly: two games have been brought up so far, and both are Ready at Dawn titles built on the same engine, so they say little about how far a game from another studio gets. Another game will most likely stop at a system call nobody implemented yet, which is logged as `[hle] unimplemented ...`, or use a GE feature this renderer does not handle. [docs/internals.md](docs/internals.md) describes the tools for finding out what is missing, and the code is organized so that adding a call is a few lines.
+
+## Saves
+
+Games save the way they do on a PSP, into `PSP/SAVEDATA` on the memory stick, and the page keeps that folder in the browser's storage for the address you play from, so progress survives a reload. When a game asks you to pick a save slot, the page shows the slots with their icons and descriptions; arrow keys, a gamepad or a tap choose one.
+
+Browser storage can be cleared along with a site's data, and it does not travel between browsers or devices. **Export saves** downloads everything as a ZIP file laid out like the PSP's `SAVEDATA` folder, and **Import saves** adds the saves from such a file. Saves copied from a real PSP or from PPSSPP are usually encrypted and will not load yet.
 
 ## Hosting
 
